@@ -6,19 +6,19 @@
     <key>Label</key>
     <string>com.vios.user</string>
     <key>Program</key>
-    <string>/bin/bash</string>
+    <string>/bin/socat</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/socat</string>
+        <string>EXEC:/vios/loop.sh,pty,echo=0,stderr</string>
+        <string>/dev/cu.qemuport1,rawer,echo=0</string>
+    </array>
     <key>UserName</key>
     <string>mobile</string>
     <key>GroupName</key>
     <string>mobile</string>
     <key>WorkingDirectory</key>
     <string>/vios/out</string>
-    <key>StandardInPath</key>
-    <string>/dev/cu.qemuport1</string>
-    <key>StandardOutPath</key>
-    <string>/dev/cu.qemuport1</string>
-    <key>StandardErrorPath</key>
-    <string>/dev/cu.qemuport1</string>
     <key>ProcessType</key>
     <string>Interactive</string>
     <key>RunAtLoad</key>
