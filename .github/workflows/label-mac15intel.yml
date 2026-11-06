@@ -1,0 +1,10 @@
+name: ViOS label mac15intel
+on:
+  push:
+    paths:
+      - 'ci-label-trigger.txt'
+jobs:
+  probe:
+    runs-on: macos-15-intel
+    steps:
+      - run: echo "LABEL mac15intel OK"; uname -a
