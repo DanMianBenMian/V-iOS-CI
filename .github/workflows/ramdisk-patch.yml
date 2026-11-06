@@ -1,0 +1,150 @@
+# V-iOS Phase 2 · PUBLIC repo / macOS runner / ZERO firmware upload
+#
+# Why a public repo: GitHub Actions minutes are free for public repos (no quota burn).
+# Why it is still compliant: this repo contains ONLY scripts, plists, the open-source
+# arm64e sysroot and build_tc.py. The runner fetches the 230 MB RestoreRamDisk itself
+# from Apple's CDN with HTTP Range requests (ipsw extract --remote) - no Apple firmware
+# is ever committed. The resulting patched image is AES-encrypted with a ONE-TIME key
+# before it becomes a (publicly readable) artifact; download it, decrypt it, then
+# delete the artifact immediately.
+#
+# Repo layout (all small, non-firmware):
+#   .github/workflows/ramdisk-patch.yml
+#   tools/ci/patch_ramdisk_vios.sh
+#   tools/launchdaemons/com.vios.root.plist
+#   tools/launchdaemons/com.vios.user.plist
+#   qemu/darwin-vm/launchdaemons/com.jprx.bash.plist
+#   qemu/darwin-vm/build_tc.py
+#   qemu/darwin-vm/sysroot/ios_sysroot.tar.gz
+#
+# Trigger:
+#   POST /repos/{owner}/{repo}/actions/workflows/ramdisk-patch.yml/dispatches
+#   {"ref":"main","inputs":{"artifact_key":"<32-byte one-time hex>"}}
+# The key is NEVER printed to logs and is useless after the artifact is deleted.
+
+name: V-iOS ramdisk patch
+
+on:
+  workflow_dispatch:
+    inputs:
+      ipsw_url:
+        description: 'Apple CDN URL for iPadOS 27.0 beta 2 (24A5370h)'
+        required: true
+        default: 'https://updates.cdn-apple.com/2026SpringSeed/fullrestores/140-21639/1B98799E-8A35-4D79-A826-78ABE1659FCF/iPad_Fall_2022_27.0_24A5370h_Restore.ipsw'
+      expected_ramdisk_sha256:
+        description: 'SHA256 of the extracted raw-APFS ramdisk (from firmware/extract_report.json)'
+        required: false
+        default: 'd2575c007992866db2a3da44b15026ddfe6c3258b8c4e4894311f524767ee244'
+      artifact_key:
+        description: 'One-time hex key used to encrypt the patched ramdisk artifact'
+        required: true
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  patch:
+    runs-on: macos-14
+    timeout-minutes: 60
+    steps:
+      - name: Checkout (public repo, no firmware in tree)
+        uses: actions/checkout@v4
+
+      - name: Install ipsw + jq
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v jq >/dev/null; then brew install jq; fi
+          if ! command -v ipsw >/dev/null; then
+            brew install blacktop/tap/ipsw || {
+              echo "brew tap failed, falling back to GitHub release binary"
+              mkdir -p /tmp/ipswdl /tmp/ipswbin
+              gh release download --repo blacktop/ipsw --clobber \
+                 --pattern '*Darwin_arm64.tar.gz' --dir /tmp/ipswdl
+              tar xzf /tmp/ipswdl/*.tar.gz -C /tmp/ipswbin
+              sudo install -m 0755 /tmp/ipswbin/ipsw /usr/local/bin/ipsw
+            }
+          fi
+          ipsw version
+          openssl version
+
+      - name: Fetch ONLY the RestoreRamDisk from Apple CDN (HTTP Range)
+        shell: bash
+        env:
+          IPSW_URL: ${{ inputs.ipsw_url }}
+          EXPECT: ${{ inputs.expected_ramdisk_sha256 }}
+        run: |
+          set -euo pipefail
+          mkdir -p out dl
+          echo "Fetching ramdisk only (NOT the 10 GB IPSW)..."
+          ipsw extract --remote "$IPSW_URL" --output dl --flat -j --dmg rdisk \
+              > dl/extract.out 2> dl/extract.err || { cat dl/extract.err; exit 1; }
+          IM4P=$(python3 - <<'PY'
+          import json
+          s = open("dl/extract.out", encoding="utf-8", errors="replace").read()
+          i, j = s.find("["), s.rfind("]")
+          d = json.loads(s[i:j+1]) if i >= 0 and j > i else []
+          print(d[0] if d else "")
+          PY
+          )
+          if [[ -z "$IM4P" || ! -f "$IM4P" ]]; then
+            IM4P=$(find dl -maxdepth 2 -type f -name '*.dmg' | head -1)
+          fi
+          [[ -n "$IM4P" && -f "$IM4P" ]] || { echo "ramdisk IM4P not found"; find dl -maxdepth 2 -type f; exit 1; }
+          echo "IM4P: $IM4P ($(stat -f%z "$IM4P") bytes)"
+          ipsw img4 im4p extract -o out/ramdisk.dmg "$IM4P"
+          echo "raw ramdisk: $(stat -f%z out/ramdisk.dmg) bytes"
+          python3 - <<'PY'
+          d = open("out/ramdisk.dmg", "rb").read(36)
+          assert d[0x20:0x24] == b"NXSB", "not a raw APFS container"
+          print("NXSB @0x20 OK")
+          PY
+          if [[ -n "$EXPECT" ]]; then
+            got="$(shasum -a 256 out/ramdisk.dmg | cut -d' ' -f1)"
+            echo "sha256=$got"
+            [[ "$got" == "$EXPECT" ]] || { echo "ERROR: ramdisk sha256 mismatch"; exit 1; }
+          fi
+
+      - name: Patch ramdisk (hdiutil / chown / codesign / build_tc)
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x tools/ci/patch_ramdisk_vios.sh
+          tools/ci/patch_ramdisk_vios.sh out/ramdisk.dmg out .
+
+      - name: Encrypt the patched image with the one-time key
+        shell: bash
+        env:
+          ARTIFACT_KEY: ${{ inputs.artifact_key }}
+        run: |
+          set -euo pipefail
+          [[ -n "$ARTIFACT_KEY" ]] || { echo "artifact_key input is required"; exit 1; }
+          openssl enc -aes-256-cbc -md sha256 -salt -pass env:ARTIFACT_KEY \
+              -in out/ramdisk.vios.dmg -out out/ramdisk.vios.dmg.enc
+          rm -f out/ramdisk.vios.dmg dl/* 2>/dev/null || true
+          echo "encrypted artifact: $(stat -f%z out/ramdisk.vios.dmg.enc) bytes"
+          echo "plaintext image removed from runner workspace"
+
+      - name: Summary
+        shell: bash
+        run: |
+          echo "### V-iOS ramdisk patch result" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          ls -lh out/ramdisk.vios.dmg.enc out/ramdisk.tc out/all_hashes out/report.json >> "$GITHUB_STEP_SUMMARY"
+          cat out/report.json >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Decrypt locally with the one-time key, then DELETE this artifact." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload encrypted outputs (1 day retention)
+        uses: actions/upload-artifact@v4
+        with:
+          name: vios-ramdisk-patched
+          path: |
+            out/ramdisk.vios.dmg.enc
+            out/ramdisk.tc
+            out/all_hashes
+            out/report.json
+          retention-days: 1
+          if-no-files-found: error
