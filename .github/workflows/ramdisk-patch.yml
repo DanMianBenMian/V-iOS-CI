@@ -21,6 +21,11 @@
 #   POST /repos/{owner}/{repo}/actions/workflows/ramdisk-patch.yml/dispatches
 #   {"ref":"main","inputs":{"artifact_key":"<32-byte one-time hex>"}}
 # The key is NEVER printed to logs and is useless after the artifact is deleted.
+#
+# RUNNER LABEL (2026-11-06 hard finding): do NOT use macos-14. On this account it
+# resolves to 'macos-14-arm64-us-default', which is NOT supported - the job is
+# cancelled before a runner is even assigned (runner_id=0, zero steps, zero billing).
+# Verified working labels: macos-15 / macos-latest / macos-15-intel / ubuntu-latest.
 
 name: V-iOS ramdisk patch
 
@@ -45,9 +50,17 @@ permissions:
 
 jobs:
   patch:
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 60
     steps:
+      - name: Runner identity (diagnostic)
+        run: |
+          echo "runner label: macos-15"
+          sw_vers
+          uname -a
+          command -v hdiutil
+          command -v codesign
+
       - name: Checkout (public repo, no firmware in tree)
         uses: actions/checkout@v4
 
@@ -89,7 +102,7 @@ jobs:
           PY
           )
           if [[ -z "$IM4P" || ! -f "$IM4P" ]]; then
-            IM4P=$(find dl -maxdepth 2 -type f -name '*.dmg' | head -1)
+            IM4P=$(find dl -maxdepth 2 -type f \( -name '*.dmg' -o -name '*.im4p' \) | head -1)
           fi
           [[ -n "$IM4P" && -f "$IM4P" ]] || { echo "ramdisk IM4P not found"; find dl -maxdepth 2 -type f; exit 1; }
           echo "IM4P: $IM4P ($(stat -f%z "$IM4P") bytes)"
