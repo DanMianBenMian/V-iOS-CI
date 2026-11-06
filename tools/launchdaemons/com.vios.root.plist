@@ -6,15 +6,15 @@
     <key>Label</key>
     <string>com.vios.root</string>
     <key>Program</key>
-    <string>/bin/bash</string>
+    <string>/bin/socat</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/socat</string>
+        <string>EXEC:/vios/loop.sh,pty,echo=0,stderr</string>
+        <string>/dev/cu.qemuport3,rawer,echo=0</string>
+    </array>
     <key>WorkingDirectory</key>
     <string>/vios/root</string>
-    <key>StandardInPath</key>
-    <string>/dev/cu.qemuport3</string>
-    <key>StandardOutPath</key>
-    <string>/dev/cu.qemuport3</string>
-    <key>StandardErrorPath</key>
-    <string>/dev/cu.qemuport3</string>
     <key>ProcessType</key>
     <string>Interactive</string>
     <key>RunAtLoad</key>
