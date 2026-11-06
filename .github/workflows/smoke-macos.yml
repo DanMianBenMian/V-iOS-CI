@@ -1,8 +1,10 @@
-name: ViOS smoke macos
+name: ViOS smoke macos push
 on:
-  workflow_dispatch:
+  push:
+    paths:
+      - 'ci-mac-trigger.txt'
 jobs:
   smoke:
     runs-on: macos-14
     steps:
-      - run: echo "SMOKE MACOS OK"; uname -a
+      - run: echo "SMOKE MACOS PUSH OK"; sw_vers; uname -a; command -v hdiutil; command -v codesign
