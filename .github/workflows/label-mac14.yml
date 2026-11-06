@@ -1,0 +1,10 @@
+name: ViOS label mac14
+on:
+  push:
+    paths:
+      - 'ci-label-trigger.txt'
+jobs:
+  probe:
+    runs-on: macos-14
+    steps:
+      - run: echo "LABEL mac14 OK"; uname -a
