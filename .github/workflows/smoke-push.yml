@@ -1,0 +1,10 @@
+name: ViOS smoke push
+on:
+  push:
+    paths:
+      - 'ci-trigger.txt'
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "SMOKE PUSH OK"; date -u
