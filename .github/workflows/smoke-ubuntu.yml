@@ -1,0 +1,8 @@
+name: ViOS smoke ubuntu
+on:
+  workflow_dispatch:
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "SMOKE UBUNTU OK"; uname -a
