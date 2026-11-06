@@ -126,38 +126,41 @@ jobs:
           chmod +x tools/ci/patch_ramdisk_vios.sh
           tools/ci/patch_ramdisk_vios.sh out/ramdisk.dmg out .
 
-      - name: Encrypt the patched image with the one-time key
+      - name: Pack (gzip) and encrypt ALL outputs with the one-time key
         shell: bash
         env:
           ARTIFACT_KEY: ${{ inputs.artifact_key }}
         run: |
           set -euo pipefail
           [[ -n "$ARTIFACT_KEY" ]] || { echo "artifact_key input is required"; exit 1; }
+          cd out
+          # The 230 MB raw-APFS image is mostly zero padding; gzip shrinks it a lot
+          # (Apple CDN / Azure blob over a slow link is the real bottleneck).
+          # Bundle EVERYTHING so the public artifact contains exactly ONE encrypted
+          # blob - no plaintext trustcache, cdhash list or report.json leaks.
+          tar czf bundle.tar.gz ramdisk.vios.dmg ramdisk.tc all_hashes report.json
+          echo "bundle before encryption: $(stat -f%z bundle.tar.gz) bytes"
           openssl enc -aes-256-cbc -md sha256 -salt -pass env:ARTIFACT_KEY \
-              -in out/ramdisk.vios.dmg -out out/ramdisk.vios.dmg.enc
-          rm -f out/ramdisk.vios.dmg dl/* 2>/dev/null || true
-          echo "encrypted artifact: $(stat -f%z out/ramdisk.vios.dmg.enc) bytes"
-          echo "plaintext image removed from runner workspace"
+              -in bundle.tar.gz -out bundle.tar.gz.enc
+          rm -f bundle.tar.gz ramdisk.vios.dmg ramdisk.tc all_hashes report.json
+          echo "encrypted artifact: $(stat -f%z bundle.tar.gz.enc) bytes"
+          echo "all plaintext outputs removed from runner workspace"
 
       - name: Summary
         shell: bash
         run: |
           echo "### V-iOS ramdisk patch result" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
-          ls -lh out/ramdisk.vios.dmg.enc out/ramdisk.tc out/all_hashes out/report.json >> "$GITHUB_STEP_SUMMARY"
-          cat out/report.json >> "$GITHUB_STEP_SUMMARY"
+          ls -lh out/bundle.tar.gz.enc >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "Decrypt locally with the one-time key, then DELETE this artifact." >> "$GITHUB_STEP_SUMMARY"
+          echo "Decrypt locally with the one-time key, untar, then DELETE this artifact." >> "$GITHUB_STEP_SUMMARY"
+          echo "report.json (A4/U4/U5 forensics) is INSIDE the encrypted bundle." >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload encrypted outputs (1 day retention)
+      - name: Upload encrypted bundle (1 day retention)
         uses: actions/upload-artifact@v4
         with:
           name: vios-ramdisk-patched
-          path: |
-            out/ramdisk.vios.dmg.enc
-            out/ramdisk.tc
-            out/all_hashes
-            out/report.json
+          path: out/bundle.tar.gz.enc
           retention-days: 1
           if-no-files-found: error
