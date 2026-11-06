@@ -1,0 +1,13 @@
+# Apple firmware must NEVER be committed here
+firmware/
+*.ipsw
+*.dmg
+*.aea
+*.im4p
+*.trustcache
+out/
+dl/
+# credentials
+.env
+*token*
+*_key*
