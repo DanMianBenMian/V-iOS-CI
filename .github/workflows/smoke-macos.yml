@@ -1,0 +1,8 @@
+name: ViOS smoke macos
+on:
+  workflow_dispatch:
+jobs:
+  smoke:
+    runs-on: macos-14
+    steps:
+      - run: echo "SMOKE MACOS OK"; uname -a
