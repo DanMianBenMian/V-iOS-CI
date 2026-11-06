@@ -56,6 +56,17 @@ echo "=== [3/9] forensic snapshot BEFORE touching anything (A4 / U4 / U5) ==="
 mkdir -p "${WORK}/forensics"
 cp "${MNT}/etc/passwd" "${WORK}/forensics/passwd"          2>/dev/null || true
 cp "${MNT}/etc/group"  "${WORK}/forensics/group"           2>/dev/null || true
+# Explicitly record whether /etc/passwd exists at all. sha256("") in the report
+# means "file missing", NOT "passwd exists but has no mobile entry".
+if [[ -f "${MNT}/etc/passwd" ]]; then
+    echo "present" > "${WORK}/forensics/passwd_exists.txt"
+else
+    echo "absent" > "${WORK}/forensics/passwd_exists.txt"
+fi
+ls -la "${MNT}/etc" > "${WORK}/forensics/etc_listing.txt" 2>/dev/null || true
+# iOS stores users in dslocal, not /etc/passwd. Inventory it for A4.
+find "${MNT}/var/db/dslocal" -maxdepth 6 -print 2>/dev/null \
+    | head -100 > "${WORK}/forensics/dslocal_listing.txt" || true
 ls -1 "${MNT}/System/Library/LaunchDaemons" > "${WORK}/forensics/LaunchDaemons.original.txt" 2>/dev/null || true
 # BSD/macOS xargs has no GNU '-r'; sed is portable and handles empty input cleanly.
 find "${MNT}/System/Library/LaunchDaemons" -maxdepth 1 -name '*.plist' -print 2>/dev/null \
@@ -78,8 +89,25 @@ cp "${ROOT}/tools/launchdaemons/com.vios.root.plist" "${LD}/"
 cp "${ROOT}/tools/launchdaemons/com.vios.user.plist" "${LD}/"
 # Upstream reference job: root bash on uart0 (/dev/console) = R0 manual fallback.
 cp "${ROOT}/qemu/darwin-vm/launchdaemons/com.jprx.bash.plist" "${LD}/" 2>/dev/null || true
-chmod 644 "${LD}"/*.plist
-sudo chown root:wheel "${LD}"/*.plist 2>/dev/null || true
+# NOTE: do NOT chown here. The volume was attached with '-owners off', so chown
+# is silently ineffective. Ownership is fixed in step [9/9] after re-attaching
+# with '-owners on' (this is exactly what upstream fix_perms.sh does).
+
+echo "--- B-plan fallback: inject a minimal passwd/group so UserName=mobile can resolve ---"
+# The stock restore ramdisk has NO /etc/passwd at all (runner forensics:
+# passwd_sha256 == sha256("") and 'passwd: No such file'). iOS normally uses
+# /var/db/dslocal, but writing a 2-line passwd is harmless and gives getpwnam()
+# a deterministic answer. Final chown/chmod happens in [9/9].
+mkdir -p "${MNT}/etc"
+cat > "${MNT}/etc/passwd" <<'EOF'
+root:*:0:0:System Administrator:/var/root:/bin/sh
+mobile:*:501:501:Mobile User:/var/mobile:/bin/sh
+EOF
+cat > "${MNT}/etc/group" <<'EOF'
+wheel:*:0:root
+mobile:*:501:mobile
+EOF
+chmod 644 "${MNT}/etc/passwd" "${MNT}/etc/group"
 
 echo "=== [5/9] layout: /vios/* and App container paths (P1 sandbox path match) ==="
 mkdir -p "${MNT}/vios/root" "${MNT}/vios/out" "${MNT}/vios/probes" "${MNT}/vios/logs"
@@ -133,7 +161,40 @@ assert ver == 1 and 24 + 22 * n == len(d), "bad trustcache"
 print("trustcache OK: version=%d entries=%d bytes=%d" % (ver, n, len(d)))
 PY
 
-echo "=== [9/9] report + detach ==="
+echo "=== [9/9] re-attach with owners ON and fix ownership ==="
+# launchd refuses LaunchDaemons plists unless they are root:wheel AND 0644
+# (boot log: "error = 122: Path had bad ownership/permissions").
+# The first mount used '-owners off' for easy writing; ownership is only
+# meaningful after re-attaching with '-owners on' (upstream fix_perms.sh).
+hdiutil detach "${MNT}" -force >/dev/null 2>&1 || true
+hdiutil attach -owners on -mountpoint "${MNT}" "${OUT}/ramdisk.vios.dmg" >/dev/null
+LD="${MNT}/System/Library/LaunchDaemons"
+sudo chown -R root:wheel "${MNT}/System" "${MNT}/bin" "${MNT}/sbin" \
+     "${MNT}/libexec" "${MNT}/vios" "${MNT}/etc" 2>/dev/null || true
+sudo chown root:wheel "${LD}"/*.plist "${MNT}/etc/passwd" "${MNT}/etc/group"
+sudo chmod 644 "${LD}"/*.plist "${MNT}/etc/passwd" "${MNT}/etc/group"
+sudo chmod 755 "${LD}" "${MNT}/System/Library" "${MNT}/etc"
+echo "--- ownership self-check (launchd requires root:wheel + 0644) ---"
+stat -f '%Su:%Sg %Sp %N' "${LD}"/*.plist "${MNT}/System/Library/LaunchDaemons" \
+     "${MNT}/etc/passwd" "${MNT}/etc/group"
+python3 - "${LD}" <<'PY'
+import os, stat, sys
+ld = sys.argv[1]
+bad = []
+for n in sorted(os.listdir(ld)):
+    if not n.endswith(".plist"):
+        continue
+    p = os.path.join(ld, n)
+    st = os.stat(p)
+    mode = stat.S_IMODE(st.st_mode)
+    if st.st_uid != 0 or st.st_gid != 0 or mode != 0o644:
+        bad.append((n, st.st_uid, st.st_gid, oct(mode)))
+print("plist ownership check:", "ALL OK" if not bad else "FAILED %r" % bad)
+if bad:
+    sys.exit(1)
+PY
+
+echo "=== [9b/9] report + detach ==="
 python3 - "${WORK}/forensics" "${OUT}" "${ROOT}" <<'PY'
 import json, os, sys, hashlib
 fdir, out, root = sys.argv[1:4]
@@ -141,12 +202,20 @@ def read(name):
     p = os.path.join(fdir, name)
     return open(p, "r", errors="replace").read() if os.path.isfile(p) else None
 passwd = read("passwd") or ""
+etc_listing = read("etc_listing.txt") or ""
+dslocal = (read("dslocal_listing.txt") or "").splitlines()
 r = {
   "stage": "macos-ramdisk-patch",
+  "a4_passwd_exists": (read("passwd_exists.txt") or "unknown").strip(),
   "a4_passwd_has_mobile": any(l.startswith("mobile:") for l in passwd.splitlines()),
   "a4_mobile_entry": read("mobile_entry.txt"),
+  "a4_bplan_passwd_injected": True,
+  "u4_dslocal_paths_sample": dslocal[:30],
+  "u4_etc_listing": etc_listing.splitlines()[:30],
   "u5_userland_sandbox_daemons": (read("userland_sandbox_daemons.txt") or "").split(),
   "launchdaemons_original_count": len((read("LaunchDaemons.original.txt") or "").split()),
+  "launchdaemons_original_names": (read("launchdaemons_plists.txt") or "").split(),
+  "plist_ownership_fixed": "owners on re-attach + root:wheel 0644",
   "passwd_sha256": hashlib.sha256(passwd.encode()).hexdigest()[:16],
   "outputs": {},
   "notes": [
@@ -170,6 +239,25 @@ hdiutil detach "${MNT}" -force >/dev/null 2>&1 || hdiutil detach "${MNT}"
 trap - EXIT
 rmdir "${MNT}" 2>/dev/null || true
 rm -rf "${WORK}"
+
+# IMPORTANT: the report above was written BEFORE detach. hdiutil flushes APFS
+# metadata when detaching, so the on-disk image hash changes. Recompute it now
+# and mark the original as a pre-detach snapshot - otherwise the report's sha256
+# will never match the artifact and looks like corruption.
+python3 - "${OUT}" <<'PY'
+import hashlib, json, os, sys
+out = sys.argv[1]
+p = os.path.join(out, "ramdisk.vios.dmg")
+rpath = os.path.join(out, "report.json")
+h = hashlib.sha256(open(p, "rb").read()).hexdigest()
+r = json.load(open(rpath))
+prev = r.get("outputs", {}).get("ramdisk.vios.dmg", {}).get("sha256")
+r.setdefault("outputs", {}).setdefault("ramdisk.vios.dmg", {})["sha256_pre_detach"] = prev
+r["outputs"]["ramdisk.vios.dmg"]["sha256"] = h
+r["outputs"]["ramdisk.vios.dmg"]["sha256_is_post_detach"] = True
+open(rpath, "w").write(json.dumps(r, indent=2, ensure_ascii=False))
+print("post-detach ramdisk sha256:", h)
+PY
 
 echo "=== DONE ==="
 ls -lh "${OUT}"
