@@ -57,8 +57,9 @@ mkdir -p "${WORK}/forensics"
 cp "${MNT}/etc/passwd" "${WORK}/forensics/passwd"          2>/dev/null || true
 cp "${MNT}/etc/group"  "${WORK}/forensics/group"           2>/dev/null || true
 ls -1 "${MNT}/System/Library/LaunchDaemons" > "${WORK}/forensics/LaunchDaemons.original.txt" 2>/dev/null || true
+# BSD/macOS xargs has no GNU '-r'; sed is portable and handles empty input cleanly.
 find "${MNT}/System/Library/LaunchDaemons" -maxdepth 1 -name '*.plist' -print 2>/dev/null \
-    | xargs -r -n1 basename | sort > "${WORK}/forensics/launchdaemons_plists.txt" || true
+    | sed 's#.*/##' | sort > "${WORK}/forensics/launchdaemons_plists.txt" || true
 # U5: are amfid / secinitd / sandboxd present as daemons in the stock ramdisk?
 grep -iE 'amfid|secinitd|sandboxd' "${WORK}/forensics/launchdaemons_plists.txt" \
     > "${WORK}/forensics/userland_sandbox_daemons.txt" || true
@@ -111,10 +112,15 @@ if [[ -d "${MNT}/var/containers/Bundle/Application/00000000-0000-0000-0000-00000
 fi
 
 echo "=== [8/9] collect cdhash and build trustcache ==="
+# Match upstream get_files.sh: cut on '=' (case-insensitive CDHash= vs cdhash=),
+# cover arm64e.x1 too, and keep ONLY 40-hex SHA1 CDHashes - build_tc.py stores
+# 20-byte CDHash entries (hashType=2) and asserts len==40.
 find "${MNT}" -type f -perm +111 \
-    \( -exec codesign -a arm64   -d -vvv {} \; -o -true \) \
-    \( -exec codesign -a arm64e  -d -vvv {} \; -o -true \) \
-    2>&1 | grep -i 'cdhash=' | sed -E 's/.*cdhash=//' | sort -u > "${OUT}/all_hashes"
+    \( -exec codesign -a arm64      -d -vvv {} \; -o -true \) \
+    \( -exec codesign -a arm64e     -d -vvv {} \; -o -true \) \
+    \( -exec codesign -a arm64e.x1  -d -vvv {} \; -o -true \) \
+    2>&1 | grep -i 'cdhash=' | cut -d= -f2- | tr -d ' ' \
+         | grep -E '^[0-9a-fA-F]{40}$' | sort -u > "${OUT}/all_hashes" || true
 NUM="$(wc -l < "${OUT}/all_hashes" | tr -d ' ')"
 echo "cdhash entries: ${NUM}"
 [[ "${NUM}" -gt 100 ]] || { echo "ERROR: cdhash collection looks broken"; exit 1; }
