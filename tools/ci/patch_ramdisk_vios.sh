@@ -113,6 +113,22 @@ echo "=== [5/9] layout: /vios/* and App container paths (P1 sandbox path match) 
 mkdir -p "${MNT}/vios/root" "${MNT}/vios/out" "${MNT}/vios/probes" "${MNT}/vios/logs"
 mkdir -p "${MNT}/var/containers/Bundle/Application/00000000-0000-0000-0000-000000000000"
 mkdir -p "${MNT}/var/mobile/Containers/Data/Application/00000000-0000-0000-0000-000000000000"
+
+echo "--- write /vios/loop.sh: persistent shell bridge for socat EXEC ---"
+# socat's EXEC parser splits argv on spaces ONLY (no shell-style quoting), so a
+# multi-word `bash -c 'while ...'` cannot be passed. Instead socat EXECs this
+# single-token script, which keeps an interactive bash alive forever. That way
+# the qemuport device is never briefly closed (which would EOF qemu's one-shot
+# socket chardev and kill the channel after the first client disconnect).
+cat > "${MNT}/vios/loop.sh" <<'EOF'
+#!/bin/bash
+# V-iOS persistent shell bridge (socat EXEC target).
+while true; do
+    /bin/bash -i
+    sleep 0.3
+done
+EOF
+chmod 0755 "${MNT}/vios/loop.sh"
 # /vios/out is writable by the U (mobile) shell; everything else stays root.
 sudo chown -R 501:501 "${MNT}/vios/out" 2>/dev/null || true
 chmod 0777 "${MNT}/vios/out"
