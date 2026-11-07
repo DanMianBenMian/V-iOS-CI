@@ -87,8 +87,12 @@ mv "${LD}" "${MNT}/System/Library/LaunchDaemons.old"
 mkdir -p "${LD}"
 cp "${ROOT}/tools/launchdaemons/com.vios.root.plist" "${LD}/"
 cp "${ROOT}/tools/launchdaemons/com.vios.user.plist" "${LD}/"
-# Upstream reference job: root bash on uart0 (/dev/console) = R0 manual fallback.
-cp "${ROOT}/qemu/darwin-vm/launchdaemons/com.jprx.bash.plist" "${LD}/" 2>/dev/null || true
+# NOTE: deliberately NOT copying qemu/darwin-vm/launchdaemons/com.jprx.bash.plist.
+# H17 root cause: a root bash that binds a qemuport via socat never reads host
+# input, and (with KeepAlive) its respawn loop floods the serial driver and trips
+# an sptm kernel panic that kills BOTH shells. The R shell is now com.vios.root on
+# uart0 (/dev/console) = R0, so a second uart0 job (com.jprx.bash) would collide.
+# Keep exactly ONE root bash on uart0 (com.vios.root) + the U shell on qemuport1.
 # NOTE: do NOT chown here. The volume was attached with '-owners off', so chown
 # is silently ineffective. Ownership is fixed in step [9/9] after re-attaching
 # with '-owners on' (this is exactly what upstream fix_perms.sh does).
@@ -114,35 +118,59 @@ mkdir -p "${MNT}/vios/root" "${MNT}/vios/out" "${MNT}/vios/probes" "${MNT}/vios/
 mkdir -p "${MNT}/var/containers/Bundle/Application/00000000-0000-0000-0000-000000000000"
 mkdir -p "${MNT}/var/mobile/Containers/Data/Application/00000000-0000-0000-0000-000000000000"
 
-echo "--- write /vios/loop.sh: persistent shell bridge for socat EXEC ---"
-# socat's EXEC parser splits argv on spaces ONLY (no shell-style quoting), so a
-# multi-word `bash -c 'while ...'` cannot be passed. Instead socat EXECs this
-# single-token script, which keeps an interactive bash alive forever. That way
-# the qemuport device is never briefly closed (which would EOF qemu's one-shot
-# socket chardev and kill the channel after the first client disconnect).
-cat > "${MNT}/vios/loop.sh" <<'EOF'
-#!/bin/bash
-# V-iOS persistent shell bridge (socat EXEC target).
-while true; do
-    /bin/bash -i
-    sleep 0.3
-done
-EOF
-chmod 0755 "${MNT}/vios/loop.sh"
+echo "--- shell bridge: exec the TRUSTED Mach-O /bin/bash directly ---"
+# We do NOT use a wrapper script. iOS/AMFI denies `process-exec-interpreter
+# /bin/bash` for an untrusted script (the script itself is not in the
+# trustcache), so a /vios/loop.sh wrapper silently fails to start a shell.
+# Instead the plist does `socat EXEC:/bin/bash,pty,echo=0,stderr`, and the host
+# relay (vios_relay.py) holds a PERMANENT connection to each qemuport chardev
+# (H14), so bash never receives EOF and stays alive for the VM's lifetime.
+# /bin/bash is already in the trustcache (479 entries) and is proven to run
+# host commands.
 # /vios/out is writable by the U (mobile) shell; everything else stays root.
 sudo chown -R 501:501 "${MNT}/vios/out" 2>/dev/null || true
 chmod 0777 "${MNT}/vios/out"
 sudo chown -R root:wheel "${MNT}/vios/root" "${MNT}/vios/probes" 2>/dev/null || true
 
-echo "=== [6/9] unpack upstream arm64e sysroot (bash / coreutils / dropbear) ==="
+echo "=== [6/9] compile guest sandbox probe (if .c present) + unpack arm64e sysroot ==="
+# Best-effort cross-compile of the native Seatbelt probe. Only runs on a macOS
+# runner with Xcode command-line tools + the iOS SDK (xcrun --sdk iphoneos).
+# If the source is absent or the toolchain is missing, we skip it gracefully:
+# the ramdisk simply ships without the native probe (S1/S3/S4 stay deferred),
+# and the JS-level probes still report an honest 'absent' verdict.
+PROBE_SRC="${ROOT}/tools/vios_sandbox_probe.c"
+PROBE_BIN="${ROOT}/tools/bin/vios_sandbox_probe"
+mkdir -p "${ROOT}/tools/bin"
+if [[ -f "${PROBE_SRC}" ]]; then
+    if command -v xcrun >/dev/null 2>&1 && xcrun --sdk iphoneos --show-sdk-path >/dev/null 2>&1; then
+        echo "--- compiling vios_sandbox_probe (arm64e, fptrauth-calls, iphoneos SDK) ---"
+        if xcrun --sdk iphoneos clang -arch arm64e -fptrauth-calls \
+                 -isysroot "$(xcrun --sdk iphoneos --show-sdk-path)" \
+                 -o "${PROBE_BIN}" "${PROBE_SRC}" 2>/tmp/vios_probe_build.log; then
+            codesign -s - -f "${PROBE_BIN}" 2>/dev/null || true
+            echo "compiled + ad-hoc signed: ${PROBE_BIN}"
+        else
+            echo "WARN: vios_sandbox_probe compile failed (see /tmp/vios_probe_build.log)"
+            echo "--- build log ---"; tail -n 20 /tmp/vios_probe_build.log || true
+        fi
+    else
+        echo "WARN: xcrun/iphoneos SDK not available - skipping native probe compile"
+    fi
+else
+    echo "no vios_sandbox_probe.c - skipping native probe compile"
+fi
+
 tar xzf "${ROOT}/qemu/darwin-vm/sysroot/ios_sysroot.tar.gz" \
     --directory "${MNT}" --strip-components 1
 
-# Optional prebuilt sandbox probe (only if it has been cross-compiled already).
-if [[ -f "${ROOT}/tools/bin/vios_sandbox_probe" ]]; then
-    cp "${ROOT}/tools/bin/vios_sandbox_probe" \
+# Inject the native sandbox probe if it exists (compiled above, or prebuilt).
+if [[ -f "${PROBE_BIN}" ]]; then
+    cp "${PROBE_BIN}" \
        "${MNT}/var/containers/Bundle/Application/00000000-0000-0000-0000-000000000000/"
-    cp "${ROOT}/tools/bin/vios_sandbox_probe" "${MNT}/vios/probes/"
+    cp "${PROBE_BIN}" "${MNT}/vios/probes/"
+    echo "native sandbox probe injected into ramdisk"
+else
+    echo "native sandbox probe NOT injected (binary absent - S1/S3/S4 deferred)"
 fi
 
 echo "=== [7/9] non-interactive permission fix + ad-hoc codesign ==="
