@@ -10,7 +10,7 @@
     <key>ProgramArguments</key>
     <array>
         <string>/bin/socat</string>
-        <string>EXEC:/vios/loop.sh,pty,echo=0,stderr</string>
+        <string>EXEC:/bin/bash,pty,echo=0,stderr</string>
         <string>/dev/cu.qemuport1,rawer,echo=0</string>
     </array>
     <key>UserName</key>
