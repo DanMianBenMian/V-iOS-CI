@@ -77,20 +77,27 @@ grep -iE 'amfid|secinitd|sandboxd' "${WORK}/forensics/launchdaemons_plists.txt" 
 # A4/U4: does 'mobile' already exist in passwd?
 grep -E '^mobile:' "${WORK}/forensics/passwd" > "${WORK}/forensics/mobile_entry.txt" || true
 
-echo "=== [4/9] replace LaunchDaemons (keep the original for later analysis) ==="
+echo "=== [4/9] preserve original LaunchDaemons + append R/U research shells ==="
 LD="${MNT}/System/Library/LaunchDaemons"
-if [[ -d "${MNT}/System/Library/LaunchDaemons.old" ]]; then
+if [[ -d "${MNT}/System/Library/LaunchDaemons.orig" ]]; then
     echo "already patched - refusing to patch twice"
     exit 1
 fi
-mv "${LD}" "${MNT}/System/Library/LaunchDaemons.old"
-mkdir -p "${LD}"
+# RESEARCH FIDELITY: the restore ramdisk must boot into a restore environment
+# that is near-identical to a normal running system, only missing the GUI/
+# SpringBoard (headless). The previous 'mv LaunchDaemons away' step stripped ALL
+# 10 stock Apple daemons (restored_external, syslogd, diskimagesiod, driverkitd,
+# the camera daemons, ...) which gutted the native environment and reduced the
+# VM to a bare shell. Instead we KEEP the stock daemon set in place (back it up
+# to LaunchDaemons.orig for forensics) and APPEND our two research shells, so the
+# VM boots a complete restore environment AND keeps R/U dual-shell access.
+cp -a "${LD}" "${MNT}/System/Library/LaunchDaemons.orig"
 cp "${ROOT}/tools/launchdaemons/com.vios.root.plist" "${LD}/"
 cp "${ROOT}/tools/launchdaemons/com.vios.user.plist" "${LD}/"
 # NOTE: deliberately NOT copying qemu/darwin-vm/launchdaemons/com.jprx.bash.plist.
 # H17 root cause: a root bash that binds a qemuport via socat never reads host
 # input, and (with KeepAlive) its respawn loop floods the serial driver and trips
-# an sptm kernel panic that kills BOTH shells. The R shell is now com.vios.root on
+# an sptm kernel panic that kills BOTH shells. The R shell is com.vios.root on
 # uart0 (/dev/console) = R0, so a second uart0 job (com.jprx.bash) would collide.
 # Keep exactly ONE root bash on uart0 (com.vios.root) + the U shell on qemuport1.
 # NOTE: do NOT chown here. The volume was attached with '-owners off', so chown
@@ -266,6 +273,7 @@ r = {
     "ramdisk.vios.dmg is a RAW APFS image (NXSB @0x20); QEMU -ramdisk mmaps it verbatim.",
     "ramdisk.tc must be passed via -tc at boot; trustcache cannot be appended at runtime.",
     "sandbox_enforced stays FALSE until S5 A/B control passes on the live VM.",
+    "RESEARCH FIDELITY: stock LaunchDaemons are PRESERVED (backed up to LaunchDaemons.orig) and kept in place; com.vios.root (uart0) + com.vios.user (qemuport1) are APPENDED. The VM now boots a near-complete restore environment (only GUI/SpringBoard absent) plus the R/U dual-shell.",
   ],
 }
 for f in ("ramdisk.vios.dmg", "ramdisk.tc", "all_hashes"):
