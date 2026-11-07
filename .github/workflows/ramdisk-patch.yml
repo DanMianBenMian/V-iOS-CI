@@ -11,11 +11,18 @@
 # Repo layout (all small, non-firmware):
 #   .github/workflows/ramdisk-patch.yml
 #   tools/ci/patch_ramdisk_vios.sh
+#   tools/vios_sandbox_probe.c        <- native Seatbelt probe source (compiled on the runner)
 #   tools/launchdaemons/com.vios.root.plist
 #   tools/launchdaemons/com.vios.user.plist
 #   qemu/darwin-vm/launchdaemons/com.jprx.bash.plist
 #   qemu/darwin-vm/build_tc.py
 #   qemu/darwin-vm/sysroot/ios_sysroot.tar.gz
+#
+# Native probe: when tools/vios_sandbox_probe.c is present, patch_ramdisk_vios.sh
+# cross-compiles it (arm64e -fptrauth-calls -isysroot iphoneos via xcrun) and injects
+# the binary into /vios/probes + the container app dir. Its cdhash is then auto-collected
+# by the [8/9] trustcache step. If the toolchain is missing, the step is skipped
+# gracefully and S1/S3/S4 stay deferred (JS probes report an honest 'absent').
 #
 # Trigger:
 #   POST /repos/{owner}/{repo}/actions/workflows/ramdisk-patch.yml/dispatches
